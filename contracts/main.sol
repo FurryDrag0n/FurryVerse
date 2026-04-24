@@ -60,6 +60,10 @@ contract FurryVerse {
         return _balances[_owner];
     }
 
+    function isApprovedMinter(address _minter) public view returns (bool) {
+        return _approvedMinters[_minter];
+    }
+
     function totalSupply() public view returns (uint256) {
         return _nextTokenId;
     }
