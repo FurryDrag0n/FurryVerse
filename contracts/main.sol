@@ -14,7 +14,7 @@ contract FurryVerse {
     string public name;
     string public symbol;
 
-    bytes private _contractURIEncoded;
+    bytes32[] private _contractURIChunks;
     bool private _isSealed;
     uint256 private _nextTokenId;
 
@@ -24,7 +24,7 @@ contract FurryVerse {
     mapping(address => uint256) private _balances;
     mapping(uint256 => address) private _tokenApprovals;
     mapping(address => mapping(address => bool)) private _operatorApprovals;
-    mapping(uint256 => bytes) private _tokenURIs;
+    mapping(uint256 => bytes32[]) private _tokenURIChunks;
     mapping(uint256 => bool) private _sealed;
     mapping(address => bool) private _approvedMinters;
 
@@ -129,7 +129,6 @@ contract FurryVerse {
 
     function _transfer(address from, address to, uint256 tokenId) internal {
         require(ownerOf(tokenId) == from, "Incorrect owner");
-        require(to != address(0), "Zero address");
 
         _approve(address(0), tokenId);
 
@@ -190,15 +189,48 @@ contract FurryVerse {
 
     function tokenURI(uint256 tokenId) public view returns (string memory uri) {
         require(_owners[tokenId] != address(0) && _sealed[tokenId], "Invalid token");
-        uri = string(_tokenURIs[tokenId]);
+
+        bytes32[] storage words = _tokenURIChunks[tokenId];
+        require(words.length > 0, "Empty metadata");
+
+        // Находим первый ненулевой байт в первом слове
+        bytes32 firstWord = words[0];
+        uint256 start; // позиция первого значащего байта (0..31)
+        for (start = 0; start < 32; start++) {
+            if (firstWord[start] != 0x00) {
+                break;
+            }
+        }
+
+        // Если всё слово нулевое — данных нет (не должно случаться)
+        require(start < 32, "Invalid data: first chunk is all zeros");
+
+        uint256 dataLen = (words.length - 1) * 32 + (32 - start);
+        bytes memory output = new bytes(dataLen);
+
+        uint256 offset;
+        // Копируем значащие байты первого слова
+        for (uint256 j = start; j < 32; j++) {
+            output[offset++] = firstWord[j];
+        }
+
+        // Копируем остальные слова полностью
+        for (uint256 i = 1; i < words.length; i++) {
+            bytes32 word = words[i];
+            for (uint256 j = 0; j < 32; j++) {
+                output[offset++] = word[j];
+            }
+        }
+
+        uri = string(output);
     }
 
-    function pushTokenURI(uint256 tokenId, bytes calldata _pushbytes) public {
+    function pushTokenURI(uint256 tokenId, bytes32[] calldata _pushbytes) public {
         require(ownerOf(tokenId) == msg.sender, "Incorrect owner");
         require(!_sealed[tokenId], "Token is already sealed");
 
         for (uint256 i = 0; i < _pushbytes.length; i++) {
-            _tokenURIs[tokenId].push(_pushbytes[i]);
+            _tokenURIChunks[tokenId].push(_pushbytes[i]);
         }
     }
 
@@ -220,20 +252,42 @@ contract FurryVerse {
         _balances[tokenOwner] -= 1;
         delete _owners[tokenId];
 
-        delete _tokenURIs[tokenId];
+        delete _tokenURIChunks[tokenId];
         delete _sealed[tokenId];
 
         emit Transfer(tokenOwner, address(0), tokenId);
     }
 
     function contractURI() public view returns (string memory) {
-        return _isSealed ? string(_contractURIEncoded) : "";
+        if (!_isSealed || _contractURIChunks.length == 0) return "";
+
+        bytes32 firstWord = _contractURIChunks[0];
+        uint256 start;
+        for (start = 0; start < 32; start++) {
+            if (firstWord[start] != 0x00) break;
+        }
+        if (start == 32) return "";
+
+        uint256 len = (_contractURIChunks.length - 1) * 32 + (32 - start);
+        bytes memory output = new bytes(len);
+        uint256 offset;
+
+        for (uint256 j = start; j < 32; j++) {
+            output[offset++] = firstWord[j];
+        }
+        for (uint256 i = 1; i < _contractURIChunks.length; i++) {
+            bytes32 word = _contractURIChunks[i];
+            for (uint256 j = 0; j < 32; j++) {
+                output[offset++] = word[j];
+            }
+        }
+        return string(output);
     }
 
-    function pushContractURI(bytes calldata _pushbytes) public onlyOwner {
+    function pushContractURI(bytes32[] calldata _pushbytes) public onlyOwner {
         require(!_isSealed, "Contract is already sealed");
         for (uint256 i = 0; i < _pushbytes.length; i++) {
-            _contractURIEncoded.push(_pushbytes[i]);
+            _contractURIChunks.push(_pushbytes[i]);
         }
     }
 
