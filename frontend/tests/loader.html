@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSTORE2 Mint</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #f0f0f0; }
+    input, textarea, button, select { display: block; width: 100%; margin: 0.5rem 0; padding: 0.6rem; box-sizing: border-box; font-size: 1rem; }
+    button { background: #b45f06; border: none; color: white; font-weight: bold; cursor: pointer; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    label { margin-top: 1rem; display: block; }
+    .mode-switch { display: flex; gap: 1rem; margin: 0.5rem 0; }
+    .mode-switch label { margin: 0; }
+    #log { background: #2a2a2a; padding: 1rem; margin: 1rem 0; max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; }
+    .progress { background: #333; border-radius: 4px; height: 20px; margin: 0.5rem 0; overflow: hidden; }
+    .progress-bar { height: 100%; background: #b45f06; width: 0%; }
+    .hidden { display: none; }
+    .warning { color: #ff9900; background: #332200; padding: 0.5rem; border-radius: 4px; margin: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>SSTORE2 Mint</h1>
+
+  <div class="warning">
+    This is currently a buggy testing interface. Before you can mint you should be approved as minter.
+  </div>
+
+  <div class="mode-switch">
+    <label><input type="radio" name="mode" value="metamask" checked> Connect MetaMask</label>
+    <label><input type="radio" name="mode" value="manual"> Enter key manually</label>
+  </div>
+
+  <div id="manualFields" class="hidden">
+    <div class="warning">
+      Never enter your private key or seed phrase on untrusted websites! Use only locally or on a completely trusted page.
+    </div>
+    <label>Private key (64 hex chars) or mnemonic phrase (12/24 words):</label>
+    <input type="text" id="privateKeyInput" placeholder="0x... or word1 word2 ...">
+    <label>RPC URL:</label>
+    <input type="text" id="rpcUrl" placeholder="https://rpc.sepolia.org">
+    <label>Gas price (wei):</label>
+    <input type="number" id="gasPriceWei" value="20000000000" min="0" step="1">
+  </div>
+
+  <label>Contract address:</label>
+  <input type="text" id="contractAddress" placeholder="0x...">
+
+  <label>Name:</label>
+  <input type="text" id="nameInput" placeholder="My item #1">
+
+  <label>Description:</label>
+  <textarea id="descInput" rows="3" placeholder="Artwork description..."></textarea>
+
+  <label>Image:</label>
+  <input type="file" id="imageInput" accept="image/*">
+
+  <button id="startBtn">Mint</button>
+  <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+  <div id="log"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+  <script>
+    const ABI = [
+      "function totalSupply() view returns (uint256)",
+      "function initToken()",
+      "function pushTokenURI(uint256 tokenId, bytes calldata _chunk)",
+      "function sealToken(uint256 tokenId)",
+      "function ownerOf(uint256 tokenId) view returns (address)",
+      "function getTokenURISize(uint256 tokenId) view returns (uint256)",
+      "function getTokenURIChunk(uint256 tokenId, uint256 index) view returns (bytes)",
+      "function tokenURI(uint256 tokenId) view returns (string)"
+    ];
+
+    // 24,575 bytes to leave room for SSTORE2's 0x00 prefix (max contract size = 24,576)
+    const MAX_CHUNK_SIZE = 24575;
+
+    let provider, signer, contract;
+    let currentTokenId = null;
+    let chunks = [];
+    let nextChunkIdx = 0;
+    let logEl, progressBar;
+    let isManualMode = false;
+    let manualGasPriceWei;
+
+    function log(msg) {
+      const el = document.getElementById('log');
+      el.textContent += msg + '\n';
+      el.scrollTop = el.scrollHeight;
+    }
+
+    document.querySelectorAll('input[name="mode"]').forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        const manualDiv = document.getElementById('manualFields');
+        if (e.target.value === 'manual') {
+          manualDiv.classList.remove('hidden');
+          isManualMode = true;
+        } else {
+          manualDiv.classList.add('hidden');
+          isManualMode = false;
+        }
+      });
+    });
+
+    async function initEthers() {
+      if (!isManualMode) {
+        if (!window.ethereum) throw new Error('MetaMask not installed');
+        await window.ethereum.request({ method: 'eth_requestAccounts' });
+        provider = new ethers.providers.Web3Provider(window.ethereum);
+        signer = provider.getSigner();
+      } else {
+        const rpcUrl = document.getElementById('rpcUrl').value.trim();
+        if (!rpcUrl) throw new Error('Please provide an RPC URL');
+        provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+
+        const secret = document.getElementById('privateKeyInput').value.trim();
+        if (!secret) throw new Error('Enter a private key or mnemonic phrase');
+
+        if (secret.startsWith('0x') && secret.length === 66) {
+          signer = new ethers.Wallet(secret, provider);
+        } else if (secret.split(/\s+/).length >= 12) {
+          signer = ethers.Wallet.fromMnemonic(secret).connect(provider);
+        } else if (!secret.startsWith('0x') && /^[0-9a-fA-F]{64}$/.test(secret)) {
+          signer = new ethers.Wallet('0x' + secret, provider);
+        } else {
+          throw new Error('Unable to parse private key or mnemonic phrase');
+        }
+
+        manualGasPriceWei = document.getElementById('gasPriceWei').value;
+        if (!manualGasPriceWei || isNaN(manualGasPriceWei) || Number(manualGasPriceWei) <= 0) {
+          throw new Error('Provide a valid gas price (wei)');
+        }
+        manualGasPriceWei = ethers.BigNumber.from(manualGasPriceWei);
+        log('Using wallet: ' + (await signer.getAddress()));
+      }
+
+      const addr = document.getElementById('contractAddress').value.trim();
+      contract = new ethers.Contract(addr, ABI, signer);
+    }
+
+    function fileToDataUri(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function splitIntoChunks(byteArray) {
+      const chunks = [];
+      for (let i = 0; i < byteArray.length; i += MAX_CHUNK_SIZE) {
+        const end = Math.min(i + MAX_CHUNK_SIZE, byteArray.length);
+        chunks.push(byteArray.slice(i, end));
+      }
+      return chunks;
+    }
+
+    function uint8ArrayToHex(uint8arr) {
+      return '0x' + Array.from(uint8arr).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function processImage(file) {
+      if (!file) throw new Error('Please select an image');
+      const maxSizeMB = 10;
+      if (file.size > maxSizeMB * 1024 * 1024) throw new Error(`File too large (max. ${maxSizeMB} MB)`);
+      // Optionally add WebP conversion for heavy compression here
+      return await fileToDataUri(file);
+    }
+
+    // percent-encoding the whole JSON instead of base64‑encoding the JSON
+    async function buildDataUri(name, desc, imageDataUri) {
+      const metadata = JSON.stringify({
+        name: name,
+        description: desc,
+        image: imageDataUri
+      });
+      // percent-encode the entire JSON (excluding unreserved characters: A-Z a-z 0-9 - _ . ~)
+      const encoded = encodeURIComponent(metadata);
+      return 'data:application/json,' + encoded;
+    }
+
+    async function startMinting() {
+      try {
+        // Warning / confirmation before proceeding
+        const proceed = window.confirm(
+          "If you don't know what are you doing, stop here.\n" +
+          "Recommended metadata size is <=144kB.\n" +
+          "Before putting an image on mainnet, strongly recommend making a test on testnet.\n" +
+          "Uploading images beyond the limits may result in loss of funds and missing visualization."
+        );
+        if (!proceed) return;
+
+        logEl = document.getElementById('log');
+        progressBar = document.getElementById('progressBar');
+        logEl.textContent = '';
+        progressBar.style.width = '0%';
+        document.getElementById('startBtn').disabled = true;
+
+        await initEthers();
+
+        const name = document.getElementById('nameInput').value.trim();
+        const desc = document.getElementById('descInput').value.trim();
+        const file = document.getElementById('imageInput').files[0];
+        if (!name || !desc || !file) throw new Error('Fill in all fields');
+
+        log('Processing image...');
+        const imageDataUri = await processImage(file);
+        log('Image converted to Base64 URI');
+
+        log('Building metadata...');
+        const finalTokenUri = await buildDataUri(name, desc, imageDataUri);
+        // log('Final tokenURI (beginning): ' + finalTokenUri.substring(0, 80) + '...');
+
+        const uriBytes = new TextEncoder().encode(finalTokenUri);
+        log('Data size: ' + uriBytes.length + ' bytes');
+        chunks = splitIntoChunks(uriBytes);
+        log(chunks.length + ' chunks will be sent (each <= ' + MAX_CHUNK_SIZE + ' bytes)');
+
+        // Determine the new tokenId
+        log('Querying totalSupply to determine new tokenId...');
+        const totalSupply = await contract.totalSupply();
+        currentTokenId = totalSupply.toNumber();
+        log('Creating item #' + currentTokenId);
+
+        // Mint
+        log('Sending initToken...');
+        let txMint;
+        if (isManualMode) {
+          txMint = await contract.initToken({ gasPrice: manualGasPriceWei });
+        } else {
+          txMint = await contract.initToken();
+        }
+        log('Mint transaction: ' + txMint.hash);
+        await txMint.wait();
+        log('Item #' + currentTokenId + ' created!');
+
+        nextChunkIdx = 0;
+        updateProgress();
+        pushNextChunk();
+      } catch (err) {
+        log('Error: ' + err.message);
+        document.getElementById('startBtn').disabled = false;
+      }
+    }
+
+    function updateProgress() {
+      if (chunks.length === 0) return;
+      const pct = Math.floor((nextChunkIdx / chunks.length) * 100);
+      progressBar.style.width = pct + '%';
+    }
+
+    async function pushNextChunk() {
+      if (nextChunkIdx >= chunks.length) {
+        log('All chunks sent. Performing final step...');
+        await sealToken();
+        return;
+      }
+
+      const chunk = chunks[nextChunkIdx];
+      const hexChunk = uint8ArrayToHex(chunk);
+      log('Sending chunk ' + (nextChunkIdx + 1) + '/' + chunks.length + ' (size: ' + chunk.length + ' bytes)...');
+      try {
+        let tx;
+        if (isManualMode) {
+          tx = await contract.pushTokenURI(currentTokenId, hexChunk, { gasPrice: manualGasPriceWei });
+        } else {
+          tx = await contract.pushTokenURI(currentTokenId, hexChunk);
+        }
+        log('Transaction: ' + tx.hash);
+        await tx.wait();
+        log('Chunk ' + (nextChunkIdx + 1) + ' written');
+        nextChunkIdx++;
+        updateProgress();
+        setTimeout(() => pushNextChunk(), 300);
+      } catch (err) {
+        log('Error sending chunk: ' + err.message);
+        document.getElementById('startBtn').disabled = false;
+      }
+    }
+
+    async function sealToken() {
+      log('Sealing item...');
+      try {
+        let tx;
+        if (isManualMode) {
+          tx = await contract.sealToken(currentTokenId, { gasPrice: manualGasPriceWei });
+        } else {
+          tx = await contract.sealToken(currentTokenId);
+        }
+        log('Hash: ' + tx.hash);
+        await tx.wait();
+        log('Item #' + currentTokenId + ' sealed! Metadata is forever on-chain.');
+        document.getElementById('startBtn').disabled = false;
+        currentTokenId = null;
+        progressBar.style.width = '100%';
+      } catch (err) {
+        log('Error during sealToken: ' + err.message);
+        document.getElementById('startBtn').disabled = false;
+      }
+    }
+
+    document.getElementById('startBtn').addEventListener('click', startMinting);
+  </script>
+</body>
+</html>
