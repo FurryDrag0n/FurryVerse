@@ -213,6 +213,29 @@ contract FurryVerse {
         uri = string(output);
     }
 
+    function tokenURIPreview(uint256 tokenId) public view returns (string memory uri) {
+        require(!_sealed[tokenId], "Sealed token. Call tokenURI instead");
+
+        address[] storage chunks = _tokenURIChunkContracts[tokenId];
+        require(chunks.length > 0, "Empty metadata");
+
+        uint256 totalLen;
+        for (uint256 i; i < chunks.length; i++) {
+            totalLen += SSTORE2.read(chunks[i]).length;
+        }
+
+        bytes memory output = new bytes(totalLen);
+        uint256 offset;
+        for (uint256 i; i < chunks.length; i++) {
+            bytes memory chunk = SSTORE2.read(chunks[i]);
+            uint256 len = chunk.length;
+            for (uint256 j; j < len; j++) {
+                output[offset++] = chunk[j];
+            }
+        }
+        uri = string(output);
+    }
+
     function getTokenURIChunk(uint256 tokenId, uint256 index) public view returns (bytes memory) {
         return SSTORE2.read(_tokenURIChunkContracts[tokenId][index]);
     }
@@ -239,19 +262,12 @@ contract FurryVerse {
         emit Transfer(address(0), msg.sender, tokenId);
     }
 
-    function burn(uint256 tokenId) public {
+    function resetTokenURI(uint256 tokenId) public {
         address tokenOwner = ownerOf(tokenId);
         require(tokenOwner == msg.sender || owner == msg.sender, "Not allowed");
         require(!_sealed[tokenId], "Token is sealed, cannot burn");
 
-        _tokenApprovals[tokenId] = address(0);
-        emit Approval(tokenOwner, address(0), tokenId);
-
-        _balances[tokenOwner] -= 1;
-        delete _owners[tokenId];
-
         delete _tokenURIChunkContracts[tokenId];
-        delete _sealed[tokenId];
     }
 
     function contractURI() public view returns (string memory uri) {
