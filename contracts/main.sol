@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: WTFPL
 pragma solidity ^0.8.0;
 
+import "./deps/SSTORE2.sol";
+
 interface IERC721Receiver {
     function onERC721Received(
         address operator,
@@ -14,7 +16,9 @@ contract FurryVerse {
     string public name;
     string public symbol;
 
-    bytes32[] private _contractURIChunks;
+    uint256 constant MAX_CHUNK_SIZE = 24575;
+
+    address[] private _contractURIChunks;
     bool private _isSealed;
     uint256 private _nextTokenId;
 
@@ -24,7 +28,7 @@ contract FurryVerse {
     mapping(address => uint256) private _balances;
     mapping(uint256 => address) private _tokenApprovals;
     mapping(address => mapping(address => bool)) private _operatorApprovals;
-    mapping(uint256 => bytes32[]) private _tokenURIChunks;
+    mapping(uint256 => address[]) private _tokenURIChunkContracts;
     mapping(uint256 => bool) private _sealed;
     mapping(address => bool) private _approvedMinters;
 
@@ -175,8 +179,6 @@ contract FurryVerse {
         _balances[msg.sender] += 1;
         _owners[tokenId] = msg.sender;
         _nextTokenId++;
-
-        emit Transfer(address(0), msg.sender, tokenId);
     }
 
     function approveMinter(address minter) public onlyOwner {
@@ -190,48 +192,42 @@ contract FurryVerse {
     function tokenURI(uint256 tokenId) public view returns (string memory uri) {
         require(_owners[tokenId] != address(0) && _sealed[tokenId], "Invalid token");
 
-        bytes32[] storage words = _tokenURIChunks[tokenId];
-        require(words.length > 0, "Empty metadata");
+        address[] storage chunks = _tokenURIChunkContracts[tokenId];
+        require(chunks.length > 0, "Empty metadata");
 
-        // Находим первый ненулевой байт в первом слове
-        bytes32 firstWord = words[0];
-        uint256 start; // позиция первого значащего байта (0..31)
-        for (start = 0; start < 32; start++) {
-            if (firstWord[start] != 0x00) {
-                break;
-            }
+        // Считаем общую длину
+        uint256 totalLen;
+        for (uint256 i; i < chunks.length; i++) {
+            totalLen += SSTORE2.read(chunks[i]).length;
         }
 
-        // Если всё слово нулевое — данных нет (не должно случаться)
-        require(start < 32, "Invalid data: first chunk is all zeros");
-
-        uint256 dataLen = (words.length - 1) * 32 + (32 - start);
-        bytes memory output = new bytes(dataLen);
-
+        bytes memory output = new bytes(totalLen);
         uint256 offset;
-        // Копируем значащие байты первого слова
-        for (uint256 j = start; j < 32; j++) {
-            output[offset++] = firstWord[j];
-        }
-
-        // Копируем остальные слова полностью
-        for (uint256 i = 1; i < words.length; i++) {
-            bytes32 word = words[i];
-            for (uint256 j = 0; j < 32; j++) {
-                output[offset++] = word[j];
+        for (uint256 i; i < chunks.length; i++) {
+            bytes memory chunk = SSTORE2.read(chunks[i]);
+            uint256 len = chunk.length;
+            for (uint256 j; j < len; j++) {
+                output[offset++] = chunk[j];
             }
         }
-
         uri = string(output);
     }
 
-    function pushTokenURI(uint256 tokenId, bytes32[] calldata _pushbytes) public {
+    function getTokenURIChunk(uint256 tokenId, uint256 index) public view returns (bytes memory) {
+        return SSTORE2.read(_tokenURIChunkContracts[tokenId][index]);
+    }
+
+    function getTokenURISize(uint256 tokenId) public view returns (uint256) {
+        return _tokenURIChunkContracts[tokenId].length;
+    }
+
+    function pushTokenURI(uint256 tokenId, bytes calldata _chunk) public {
         require(ownerOf(tokenId) == msg.sender, "Incorrect owner");
         require(!_sealed[tokenId], "Token is already sealed");
-
-        for (uint256 i = 0; i < _pushbytes.length; i++) {
-            _tokenURIChunks[tokenId].push(_pushbytes[i]);
-        }
+        require(_chunk.length > 0 && _chunk.length <= 24576, "Invalid chunk size");
+        
+        address chunkContract = SSTORE2.write(_chunk);
+        _tokenURIChunkContracts[tokenId].push(chunkContract);
     }
 
     function sealToken(uint256 tokenId) public {
@@ -239,6 +235,8 @@ contract FurryVerse {
         require(!_sealed[tokenId], "Already sealed");
 
         _sealed[tokenId] = true;
+
+        emit Transfer(address(0), msg.sender, tokenId);
     }
 
     function burn(uint256 tokenId) public {
@@ -252,43 +250,40 @@ contract FurryVerse {
         _balances[tokenOwner] -= 1;
         delete _owners[tokenId];
 
-        delete _tokenURIChunks[tokenId];
+        delete _tokenURIChunkContracts[tokenId];
         delete _sealed[tokenId];
-
-        emit Transfer(tokenOwner, address(0), tokenId);
     }
 
-    function contractURI() public view returns (string memory) {
+    function contractURI() public view returns (string memory uri) {
         if (!_isSealed || _contractURIChunks.length == 0) return "";
 
-        bytes32 firstWord = _contractURIChunks[0];
-        uint256 start;
-        for (start = 0; start < 32; start++) {
-            if (firstWord[start] != 0x00) break;
-        }
-        if (start == 32) return "";
+        address[] storage chunks = _contractURIChunks;
+        require(chunks.length > 0, "Empty metadata");
 
-        uint256 len = (_contractURIChunks.length - 1) * 32 + (32 - start);
-        bytes memory output = new bytes(len);
+        // Считаем общую длину
+        uint256 totalLen;
+        for (uint256 i; i < chunks.length; i++) {
+            totalLen += SSTORE2.read(chunks[i]).length;
+        }
+
+        bytes memory output = new bytes(totalLen);
         uint256 offset;
-
-        for (uint256 j = start; j < 32; j++) {
-            output[offset++] = firstWord[j];
-        }
-        for (uint256 i = 1; i < _contractURIChunks.length; i++) {
-            bytes32 word = _contractURIChunks[i];
-            for (uint256 j = 0; j < 32; j++) {
-                output[offset++] = word[j];
+        for (uint256 i; i < chunks.length; i++) {
+            bytes memory chunk = SSTORE2.read(chunks[i]);
+            uint256 len = chunk.length;
+            for (uint256 j; j < len; j++) {
+                output[offset++] = chunk[j];
             }
         }
-        return string(output);
+        uri = string(output);
     }
 
-    function pushContractURI(bytes32[] calldata _pushbytes) public onlyOwner {
+    function pushContractURI(bytes calldata _chunk) public onlyOwner {
         require(!_isSealed, "Contract is already sealed");
-        for (uint256 i = 0; i < _pushbytes.length; i++) {
-            _contractURIChunks.push(_pushbytes[i]);
-        }
+        require(_chunk.length > 0 && _chunk.length <= 24576, "Invalid chunk size");
+        
+        address chunkContract = SSTORE2.write(_chunk);
+        _contractURIChunks.push(chunkContract);
     }
 
     function sealContract() public onlyOwner {
