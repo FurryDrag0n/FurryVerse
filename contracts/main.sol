@@ -286,6 +286,12 @@ contract FurryVerse {
         _contractURIChunks.push(chunkContract);
     }
 
+    function resetContractURI() public onlyOwner {
+        require(!_isSealed, "Contract is already sealed");
+
+        delete _contractURIChunks;
+    }
+
     function sealContract() public onlyOwner {
         require(!_isSealed, "Contract is already sealed");
         _isSealed = true;
